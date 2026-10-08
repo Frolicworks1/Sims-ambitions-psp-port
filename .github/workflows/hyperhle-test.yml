@@ -1,4 +1,4 @@
-name: HyperHLE workflow test
+name: HyperHLE Fixed APK
 
 on:
   push:
@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  test:
+  build:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout HyperHLE
@@ -18,4 +18,116 @@ jobs:
           path: hyperhle
           submodules: recursive
           fetch-depth: 0
-      - run: test -f hyperhle/Cargo.toml && echo "checkout-ok"
+
+      - name: Patch UITextField
+        working-directory: hyperhle
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("src/frameworks/uikit/ui_view/ui_control/ui_text_field.rs")
+          s = p.read_text()
+          field = "    content_vertical_alignment: NSInteger,\n"
+          if "text_input_in_progress: bool" not in s:
+              s = s.replace(field, field + "    text_input_in_progress: bool,\n", 1)
+              init = "            content_vertical_alignment: 0,\n"
+              s = s.replace(init, init + "            text_input_in_progress: false,\n", 1)
+
+          old = """- (())setText:(id)text {
+    let text_label = env.objc.borrow::<UITextFieldHostObject>(this).text_label;
+    let _: () = msg![env; text_label setText:text];
+    let center: id = msg_class![env; NSNotificationCenter defaultCenter];
+    let name = ns_string::get_static_str(env, UITextFieldTextDidChangeNotification);
+    let _: () = msg![env; center postNotificationName:name object:this userInfo:nil];
+}"""
+          new = """- (())setText:(id)text {
+    let suppress = env.objc.borrow::<UITextFieldHostObject>(this).text_input_in_progress;
+    let text_label = env.objc.borrow::<UITextFieldHostObject>(this).text_label;
+    let _: () = msg![env; text_label setText:text];
+    if !suppress {
+        let center: id = msg_class![env; NSNotificationCenter defaultCenter];
+        let name = ns_string::get_static_str(env, UITextFieldTextDidChangeNotification);
+        let _: () = msg![env; center postNotificationName:name object:this userInfo:nil];
+    }
+}"""
+          if old not in s:
+              raise SystemExit("setText block not found")
+          s = s.replace(old, new, 1)
+
+          a = s.index("pub fn handle_text(")
+          b = s.index("\npub fn handle_backspace(", a)
+          fn = s[a:b]
+          sig = "pub fn handle_text(env: &mut Environment, text_field: id, text: String) {"
+          fn = fn.replace(sig, sig + """
+    if env.objc.borrow::<UITextFieldHostObject>(text_field).text_input_in_progress { return; }
+    env.objc.borrow_mut::<UITextFieldHostObject>(text_field).text_input_in_progress = true;""", 1)
+          needle = "        release(env, new_text);"
+          fn = fn.replace(needle, needle + """
+        let center: id = msg_class![env; NSNotificationCenter defaultCenter];
+        let name = ns_string::get_static_str(env, UITextFieldTextDidChangeNotification);
+        let _: () = msg![env; center postNotificationName:name object:text_field userInfo:nil];""", 1)
+          fn = fn.replace("\n}", """
+    release(env, txt);
+    env.objc.borrow_mut::<UITextFieldHostObject>(text_field).text_input_in_progress = false;
+}""", 1)
+          s = s[:a] + fn + s[b:]
+
+          a = s.index("pub fn handle_backspace(")
+          b = s.index("\npub fn handle_return(", a)
+          fn = s[a:b]
+          sig = "pub fn handle_backspace(env: &mut Environment, text_field: id) {"
+          fn = fn.replace(sig, sig + """
+    if env.objc.borrow::<UITextFieldHostObject>(text_field).text_input_in_progress { return; }""", 1)
+          needle = "    let range = NSRange { location: len - 1, length: 1 };"
+          fn = fn.replace(needle, needle + """
+    env.objc.borrow_mut::<UITextFieldHostObject>(text_field).text_input_in_progress = true;""", 1)
+          needle = "        let _: () = msg![env; text_field setNeedsDisplay];"
+          fn = fn.replace(needle, needle + """
+        let center: id = msg_class![env; NSNotificationCenter defaultCenter];
+        let name = ns_string::get_static_str(env, UITextFieldTextDidChangeNotification);
+        let _: () = msg![env; center postNotificationName:name object:text_field userInfo:nil];""", 1)
+          fn = fn.replace("\n}", """
+    env.objc.borrow_mut::<UITextFieldHostObject>(text_field).text_input_in_progress = false;
+}""", 1)
+          s = s[:a] + fn + s[b:]
+
+          p.write_text(s)
+          print("patch applied")
+          PY
+
+      - name: Build Debug APK
+        working-directory: hyperhle
+        run: |
+          set -euxo pipefail
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq p7zip-full
+          cargo install cargo-ndk@3.5.4
+          rustup target add aarch64-linux-android
+          mkdir -p vendor gradle android-ndk
+          curl -L -o boost.7z https://archives.boost.io/release/1.81.0/source/boost_1_81_0.7z
+          7z -ovendor x boost.7z
+          mv vendor/boost_1_81_0 vendor/boost
+          curl -L -o cmake.tar.gz https://github.com/Kitware/CMake/releases/download/v3.31.6/cmake-3.31.6-linux-x86_64.tar.gz
+          tar xzf cmake.tar.gz -C vendor
+          mv vendor/cmake-3.31.6-linux-x86_64 vendor/cmake
+          curl -L -o ndk.zip https://dl.google.com/android/repository/android-ndk-r25c-linux.zip
+          7z -oandroid-ndk -snld x ndk.zip
+          ln -s "$PWD/android-ndk/android-ndk-r25c" "$ANDROID_SDK_ROOT/ndk/25.2.9519653"
+          echo "sdk.dir=$ANDROID_SDK_ROOT" > android/local.properties
+          curl -L -o gradle.zip https://services.gradle.org/distributions/gradle-8.11.1-bin.zip
+          7z -ogradle x gradle.zip
+          cd android
+          ../gradle/gradle-8.11.1/bin/gradle assembleDebug
+          cp app/build/outputs/apk/debug/app-debug.apk ../HyperHLE-Fixed-Sims-Keyboard.apk
+
+      - name: Verify APK
+        working-directory: hyperhle
+        run: |
+          test -s HyperHLE-Fixed-Sims-Keyboard.apk
+          unzip -l HyperHLE-Fixed-Sims-Keyboard.apk | grep -q AndroidManifest.xml
+          unzip -l HyperHLE-Fixed-Sims-Keyboard.apk | grep -q 'lib/arm64-v8a'
+
+      - name: Upload fixed APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: HyperHLE-Fixed-Sims-Keyboard-AArch64
+          path: hyperhle/HyperHLE-Fixed-Sims-Keyboard.apk
