@@ -4,7 +4,7 @@ from __future__ import annotations
 import argparse, hashlib, json, struct, zipfile
 from pathlib import Path
 
-M3G_ID=b"\xABJSR184\x0D\x0A\x1A\x0A"
+M3G_ID=b"\xABJSR184\xBB\x0D\x0A\x1A\x0A"
 
 def sha256(p):
     h=hashlib.sha256()
