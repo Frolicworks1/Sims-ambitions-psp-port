@@ -119,7 +119,11 @@ jobs:
           curl -L -o gradle.zip https://services.gradle.org/distributions/gradle-8.11.1-bin.zip
           7z -ogradle x gradle.zip
           cd android
-          ../gradle/gradle-8.11.1/bin/gradle assembleDebug
+          # libtouchHLE uses C++ iostream RTTI/vtables. Static-link the NDK libc++
+          # into the single touchHLE shared library to avoid an incompatible
+          # libc++_shared.so at runtime.
+          export RUSTFLAGS="-C link-arg=-static-libstdc++"
+          ../gradle/gradle-8.11.1/bin/gradle clean assembleDebug
           cp app/build/outputs/apk/debug/HyperHLE-Fork-debug.apk ../HyperHLE-Fixed-Sims-Keyboard.apk
           
 
