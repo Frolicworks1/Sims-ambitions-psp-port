@@ -120,7 +120,7 @@ jobs:
           7z -ogradle x gradle.zip
           cd android
           ../gradle/gradle-8.11.1/bin/gradle assembleDebug
-          cp app/build/outputs/apk/debug/app-debug.apk ../HyperHLE-Fixed-Sims-Keyboard.apk
+          cp app/build/outputs/apk/debug/HyperHLE-Fork-debug.apk ../HyperHLE-Fixed-Sims-Keyboard.apk
           
 
       - name: Verify APK
