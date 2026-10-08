@@ -85,6 +85,13 @@ jobs:
           }
           '''
           p.write_text(s[:start] + block + s[end:])
+
+          # cargo-ndk/Gradle otherwise insists on packaging the shared C++ runtime.
+          g = Path("android/app/build.gradle")
+          gs = g.read_text()
+          gs = gs.replace(', "libc++_shared.so"', '')
+          gs = gs.replace(', "libc++_shared.so"', '')
+          g.write_text(gs)
           print("All source patches applied")
           PY
 
