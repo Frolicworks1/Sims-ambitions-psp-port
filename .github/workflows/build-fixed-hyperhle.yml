@@ -15,7 +15,6 @@ jobs:
     steps:
       - name: Checkout launcher repository
         uses: actions/checkout@v4
-
       - name: Checkout HyperHLE source
         uses: actions/checkout@v4
         with:
@@ -25,7 +24,6 @@ jobs:
           submodules: recursive
           fetch-depth: 0
           fetch-tags: true
-
       - name: Patch UITextField IME notification re-entry
         working-directory: hyperhle
         shell: python
@@ -33,33 +31,16 @@ jobs:
           from pathlib import Path
           p = Path("src/frameworks/uikit/ui_view/ui_control/ui_text_field.rs")
           s = p.read_text()
+          marker = "    content_vertical_alignment: NSInteger,\n"
+          if "suppress_text_change_notification: bool" not in s:
+              s = s.replace(marker, marker + "    suppress_text_change_notification: bool,\n", 1)
+          marker = "            content_vertical_alignment: 0,\n"
+          if "suppress_text_change_notification: false" not in s:
+              s = s.replace(marker, marker + "            suppress_text_change_notification: false,\n", 1)
 
-          old = """    content_vertical_alignment: NSInteger,
-}"""
-          new = """    content_vertical_alignment: NSInteger,
-    suppress_text_change_notification: bool,
-}"""
-          if old not in s:
-              raise SystemExit("UITextFieldHostObject insertion point not found")
-          s = s.replace(old, new, 1)
-
-          old = """            content_vertical_alignment: 0,
-        }"""
-          new = """            content_vertical_alignment: 0,
-            suppress_text_change_notification: false,
-        }"""
-          if old not in s:
-              raise SystemExit("UITextField default insertion point not found")
-          s = s.replace(old, new, 1)
-
-          old = """- (())setText:(id)text {
-    let text_label = env.objc.borrow::<UITextFieldHostObject>(this).text_label;
-    let _: () = msg![env; text_label setText:text];
-    let center: id = msg_class![env; NSNotificationCenter defaultCenter];
-    let name = ns_string::get_static_str(env, UITextFieldTextDidChangeNotification);
-    let _: () = msg![env; center postNotificationName:name object:this userInfo:nil];
-}"""
-          new = """- (())setText:(id)text {
+          start = s.index("- (())setText:(id)text {")
+          end = s.index("\n}\n\n- (id)attributedText", start) + 2
+          s = s[:start] + """- (())setText:(id)text {
     let suppress = env.objc.borrow::<UITextFieldHostObject>(this).suppress_text_change_notification;
     let text_label = env.objc.borrow::<UITextFieldHostObject>(this).text_label;
     let _: () = msg![env; text_label setText:text];
@@ -68,22 +49,17 @@ jobs:
         let name = ns_string::get_static_str(env, UITextFieldTextDidChangeNotification);
         let _: () = msg![env; center postNotificationName:name object:this userInfo:nil];
     }
-}"""
-          if old not in s:
-              raise SystemExit("setText implementation not found")
-          s = s.replace(old, new, 1)
+}""" + s[end:]
 
-          old = """    if should {
-        let new_text: id = msg![env; curr_text stringByAppendingString:txt];
-        // Route through setText: on the text field so that notification is posted.
-        let _: () = msg![env; text_field setText:new_text];
-        let _: () = msg![env; text_field setNeedsDisplay];
-        release(env, new_text);
-    }"""
-          new = """    if should {
-        let new_text: id = msg![env; curr_text stringByAppendingString:txt];
-
-        env.objc.borrow_mut::<UITextFieldHostObject>(text_field)
+          def patch_handler(name, next_name):
+              nonlocal s
+              start = s.index("pub fn " + name)
+              end = s.index("\npub fn " + next_name, start)
+              block = s[start:end]
+              call = "let _: () = msg![env; text_field setText:new_text];"
+              if call not in block:
+                  raise SystemExit(name + " setText call not found")
+              replacement = """env.objc.borrow_mut::<UITextFieldHostObject>(text_field)
             .suppress_text_change_notification = true;
         let _: () = msg![env; text_field setText:new_text];
         env.objc.borrow_mut::<UITextFieldHostObject>(text_field)
@@ -91,42 +67,14 @@ jobs:
 
         let center: id = msg_class![env; NSNotificationCenter defaultCenter];
         let name = ns_string::get_static_str(env, UITextFieldTextDidChangeNotification);
-        let _: () = msg![env; center postNotificationName:name object:text_field userInfo:nil];
+        let _: () = msg![env; center postNotificationName:name object:text_field userInfo:nil];"""
+              block = block.replace(call, replacement, 1)
+              s = s[:start] + block + s[end:]
 
-        let _: () = msg![env; text_field setNeedsDisplay];
-        release(env, new_text);
-    }"""
-          if old not in s:
-              raise SystemExit("handle_text implementation not found")
-          s = s.replace(old, new, 1)
-
-          old = """    if should {
-        let new_text: id = msg![env; curr_text substringToIndex:(len - 1)];
-        // See handle_text above: go through setText: so the notification is posted.
-        let _: () = msg![env; text_field setText:new_text];
-        let _: () = msg![env; text_field setNeedsDisplay];
-    }"""
-          new = """    if should {
-        let new_text: id = msg![env; curr_text substringToIndex:(len - 1)];
-
-        env.objc.borrow_mut::<UITextFieldHostObject>(text_field)
-            .suppress_text_change_notification = true;
-        let _: () = msg![env; text_field setText:new_text];
-        env.objc.borrow_mut::<UITextFieldHostObject>(text_field)
-            .suppress_text_change_notification = false;
-
-        let center: id = msg_class![env; NSNotificationCenter defaultCenter];
-        let name = ns_string::get_static_str(env, UITextFieldTextDidChangeNotification);
-        let _: () = msg![env; center postNotificationName:name object:text_field userInfo:nil];
-
-        let _: () = msg![env; text_field setNeedsDisplay];
-    }"""
-          if old not in s:
-              raise SystemExit("handle_backspace implementation not found")
-          s = s.replace(old, new, 1)
-
+          patch_handler("handle_text", "handle_backspace")
+          patch_handler("handle_backspace", "handle_return")
           p.write_text(s)
-          print("Patched", p)
+          print("UITextField IME re-entry patch applied")
 
       - name: Build Android AArch64 APK
         working-directory: hyperhle
@@ -142,26 +90,21 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq p7zip-full
           cargo install cargo-ndk@3.5.4
           rustup target add aarch64-linux-android
-
           mkdir -p vendor
           curl -L -o boost_1_81_0.7z https://archives.boost.io/release/1.81.0/source/boost_1_81_0.7z
           7z -ovendor x boost_1_81_0.7z
           mv vendor/boost_1_81_0 vendor/boost
-
           curl -L -o cmake.tar.gz https://github.com/Kitware/CMake/releases/download/v3.31.6/cmake-3.31.6-linux-x86_64.tar.gz
           tar xzf cmake.tar.gz -C vendor
           mv vendor/cmake-3.31.6-linux-x86_64 vendor/cmake
-
           mkdir -p android-ndk
           curl -L -o android-ndk-r25c-linux.zip https://dl.google.com/android/repository/android-ndk-r25c-linux.zip
           7z -oandroid-ndk -snld x android-ndk-r25c-linux.zip
           ln -s "$PWD/android-ndk/android-ndk-r25c" "$ANDROID_SDK_ROOT/ndk/25.2.9519653"
           echo "sdk.dir=$ANDROID_SDK_ROOT" > android/local.properties
-
           curl -L -o gradle-8.11.1-bin.zip https://services.gradle.org/distributions/gradle-8.11.1-bin.zip
           mkdir -p gradle
           7z -ogradle x gradle-8.11.1-bin.zip
-
           cd android
           ../gradle/gradle-8.11.1/bin/gradle assembleRelease
           cp app/build/outputs/apk/release/HyperHLE-Fork-release.apk ../HyperHLE-Fixed-Sims-Keyboard.apk
