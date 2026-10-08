@@ -96,6 +96,50 @@ jobs:
           
           PY
 
+      - name: Patch Android C++ runtime linkage
+        working-directory: hyperhle
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("build.rs")
+          s = p.read_text()
+          old = '''    if std::env::var("CARGO_CFG_TARGET_OS").unwrap() == "android" {
+        println!("cargo:rustc-link-lib=c++_shared");
+        let sysroot_libs_path =
+            PathBuf::from(std::env::var_os("CARGO_NDK_SYSROOT_LIBS_PATH").unwrap());
+        let lib_path = sysroot_libs_path.join("libc++_shared.so");
+        std::fs::copy(
+            lib_path,
+            // cargo-ndk as invoked by cargo-ndk-android-gradle actually
+            // copies from the target directory, using this hacky path
+            // concatenation approach. :(
+            package_root
+                .join("target")
+                .join(std::env::var("TARGET").unwrap())
+                .join(std::env::var("PROFILE").unwrap())
+                .join("libc++_shared.so"),
+        )
+        .unwrap();
+    }
+'''
+          new = '''    if std::env::var("CARGO_CFG_TARGET_OS").unwrap() == "android" {
+        // Dynarmic is C++ and uses libc++ iostream RTTI/vtables. The Android
+        // shared runtime supplied by cargo-ndk does not export all of the
+        // vtables this build needs, so link the NDK's static libc++ into
+        // libtouchHLE.so instead of depending on libc++_shared.so at runtime.
+        let sysroot_libs_path =
+            PathBuf::from(std::env::var_os("CARGO_NDK_SYSROOT_LIBS_PATH").unwrap());
+        println!("cargo:rustc-link-search=native={}", sysroot_libs_path.display());
+        println!("cargo:rustc-link-lib=static=c++_static");
+        println!("cargo:rustc-link-lib=static=c++abi");
+    }
+'''
+          if old not in s:
+              raise SystemExit("Android libc++ build.rs block not found")
+          p.write_text(s.replace(old, new, 1))
+          print("Android C++ runtime patch applied")
+          PY
+
       - name: Build Debug APK
         working-directory: hyperhle
         run: |
@@ -119,10 +163,6 @@ jobs:
           curl -L -o gradle.zip https://services.gradle.org/distributions/gradle-8.11.1-bin.zip
           7z -ogradle x gradle.zip
           cd android
-          # libtouchHLE uses C++ iostream RTTI/vtables. Static-link the NDK libc++
-          # into the single touchHLE shared library to avoid an incompatible
-          # libc++_shared.so at runtime.
-          export RUSTFLAGS="-C link-arg=-static-libstdc++"
           ../gradle/gradle-8.11.1/bin/gradle clean assembleDebug
           cp app/build/outputs/apk/debug/HyperHLE-Fork-debug.apk ../HyperHLE-Fixed-Sims-Keyboard.apk
           
@@ -133,6 +173,14 @@ jobs:
           test -s HyperHLE-Fixed-Sims-Keyboard.apk
           unzip -l HyperHLE-Fixed-Sims-Keyboard.apk | grep -q AndroidManifest.xml
           unzip -l HyperHLE-Fixed-Sims-Keyboard.apk | grep -q 'lib/arm64-v8a'
+          rm -rf /tmp/hle-apk-check && mkdir -p /tmp/hle-apk-check
+          unzip -q HyperHLE-Fixed-Sims-Keyboard.apk 'lib/arm64-v8a/libtouchHLE.so' -d /tmp/hle-apk-check
+          if readelf -d /tmp/hle-apk-check/lib/arm64-v8a/libtouchHLE.so | grep -q 'libc++_shared.so'; then
+            echo 'ERROR: libtouchHLE.so still depends on libc++_shared.so'
+            readelf -d /tmp/hle-apk-check/lib/arm64-v8a/libtouchHLE.so
+            exit 1
+          fi
+          echo 'OK: libtouchHLE.so has no libc++_shared.so runtime dependency'
 
       - name: Upload fixed APK
         uses: actions/upload-artifact@v4
