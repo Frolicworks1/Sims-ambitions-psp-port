@@ -1,133 +1,107 @@
 name: Build fixed HyperHLE Android APK
-
 on:
   push:
-    paths:
-      - ".github/workflows/build-fixed-hyperhle.yml"
+    branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
-  build:
+  build-android:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout launcher repository
-        uses: actions/checkout@v4
-
-      - name: Checkout HyperHLE source
-        uses: actions/checkout@v4
+      - name: Checkout HyperHLE
+        uses: actions/checkout@main
         with:
           repository: KlugKlugTG/HyperHLE-Fork
           ref: trunk
-          path: hyperhle
           submodules: recursive
           fetch-depth: 0
           fetch-tags: true
 
-      - name: Patch UITextField IME notification re-entry
-        working-directory: hyperhle
-        shell: bash
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path("src/frameworks/uikit/ui_view/ui_control/ui_text_field.rs")
-          s = p.read_text()
-          marker = "    content_vertical_alignment: NSInteger,\n"
-          if "suppress_text_change_notification: bool" not in s:
-              s = s.replace(marker, marker + "    suppress_text_change_notification: bool,\n", 1)
-          marker = "            content_vertical_alignment: 0,\n"
-          if "suppress_text_change_notification: false" not in s:
-              s = s.replace(marker, marker + "            suppress_text_change_notification: false,\n", 1)
+      - name: Cache Boost
+        id: cache-boost
+        uses: actions/cache@main
+        with:
+          path: vendor/boost
+          key: boost_1_81_0
+      - if: steps.cache-boost.outputs.cache-hit != 'true'
+        run: curl -L -o boost_1_81_0.7z https://archives.boost.io/release/1.81.0/source/boost_1_81_0.7z
+      - if: steps.cache-boost.outputs.cache-hit != 'true'
+        run: mkdir -p vendor && 7z -ovendor x boost_1_81_0.7z && mv vendor/boost_1_81_0 vendor/boost
 
-          start = s.index("- (())setText:(id)text {")
-          end = s.index("\n}\n\n- (id)attributedText", start) + 2
-          s = s[:start] + """- (())setText:(id)text {
-    let suppress = env.objc.borrow::<UITextFieldHostObject>(this).suppress_text_change_notification;
-    let text_label = env.objc.borrow::<UITextFieldHostObject>(this).text_label;
-    let _: () = msg![env; text_label setText:text];
-    if !suppress {
-        let center: id = msg_class![env; NSNotificationCenter defaultCenter];
-        let name = ns_string::get_static_str(env, UITextFieldTextDidChangeNotification);
-        let _: () = msg![env; center postNotificationName:name object:this userInfo:nil];
-    }
-}""" + s[end:]
+      - name: Cache CMake
+        id: cache-cmake
+        uses: actions/cache@main
+        with:
+          path: vendor/cmake
+          key: cmake_3_31_6_linux
+      - if: steps.cache-cmake.outputs.cache-hit != 'true'
+        run: curl -L -O https://github.com/Kitware/CMake/releases/download/v3.31.6/cmake-3.31.6-linux-x86_64.tar.gz
+      - if: steps.cache-cmake.outputs.cache-hit != 'true'
+        run: tar xzf cmake-3.31.6-linux-x86_64.tar.gz -C vendor && mv vendor/cmake-3.31.6-linux-x86_64 vendor/cmake
 
-          def patch_handler(name, next_name):
-              nonlocal s
-              start = s.index("pub fn " + name)
-              end = s.index("\npub fn " + next_name, start)
-              block = s[start:end]
-              call = "let _: () = msg![env; text_field setText:new_text];"
-              if call not in block:
-                  raise SystemExit(name + " setText call not found")
-              replacement = """env.objc.borrow_mut::<UITextFieldHostObject>(text_field)
-            .suppress_text_change_notification = true;
-        let _: () = msg![env; text_field setText:new_text];
-        env.objc.borrow_mut::<UITextFieldHostObject>(text_field)
-            .suppress_text_change_notification = false;
+      - name: Install Android target
+        run: rustup target add aarch64-linux-android
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk@3.5.4
 
-        let center: id = msg_class![env; NSNotificationCenter defaultCenter];
-        let name = ns_string::get_static_str(env, UITextFieldTextDidChangeNotification);
-        let _: () = msg![env; center postNotificationName:name object:text_field userInfo:nil];"""
-              block = block.replace(call, replacement, 1)
-              s = s[:start] + block + s[end:]
+      - name: Cache Gradle
+        id: cache-gradle
+        uses: actions/cache@main
+        with:
+          path: gradle
+          key: gradle-8.11.1
+      - if: steps.cache-gradle.outputs.cache-hit != 'true'
+        run: curl -L -o gradle-8.11.1-bin.zip https://services.gradle.org/distributions/gradle-8.11.1-bin.zip
+      - if: steps.cache-gradle.outputs.cache-hit != 'true'
+        run: 7z -ogradle x gradle-8.11.1-bin.zip
 
-          patch_handler("handle_text", "handle_backspace")
-          patch_handler("handle_backspace", "handle_return")
-          p.write_text(s)
-          print("UITextField IME re-entry patch applied")
-          PY
+      - name: Cache Android NDK
+        id: cache-ndk
+        uses: actions/cache@main
+        with:
+          path: android-ndk
+          key: android-ndk-r25c
+      - if: steps.cache-ndk.outputs.cache-hit != 'true'
+        run: curl -L -o android-ndk-r25c-linux.zip https://dl.google.com/android/repository/android-ndk-r25c-linux.zip
+      - if: steps.cache-ndk.outputs.cache-hit != 'true'
+        run: 7z -oandroid-ndk -snld x android-ndk-r25c-linux.zip
 
-      - name: Build Android AArch64 APK
-        working-directory: hyperhle
-        shell: bash
+      - name: Link NDK
+        run: ln -s $PWD/android-ndk/android-ndk-r25c $ANDROID_SDK_ROOT/ndk/25.2.9519653
+      - name: Android local.properties
+        run: echo sdk.dir=$ANDROID_SDK_ROOT > android/local.properties
+
+      - name: Build APK
         env:
           HYPERHLE_KEYSTORE_B64: ${{ secrets.HYPERHLE_KEYSTORE_B64 }}
           HYPERHLE_KEYSTORE_PASSWORD: ${{ secrets.HYPERHLE_KEYSTORE_PASSWORD }}
           HYPERHLE_KEY_ALIAS: ${{ secrets.HYPERHLE_KEY_ALIAS }}
           ANDROID_NDK_ROOT: /usr/local/lib/android/sdk/ndk/25.2.9519653
-        run: |
-          set -euxo pipefail
-          sudo apt-get update -qq
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq p7zip-full
-          cargo install cargo-ndk@3.5.4
-          rustup target add aarch64-linux-android
-          mkdir -p vendor
-          curl -L -o boost_1_81_0.7z https://archives.boost.io/release/1.81.0/source/boost_1.81.0.7z
-          7z -ovendor x boost_1_81_0.7z
-          mv vendor/boost_1_81_0 vendor/boost
-          curl -L -o cmake.tar.gz https://github.com/Kitware/CMake/releases/download/v3.31.6/cmake-3.31.6-linux-x86_64.tar.gz
-          tar xzf cmake.tar.gz -C vendor
-          mv vendor/cmake-3.31.6-linux-x86_64 vendor/cmake
-          mkdir -p android-ndk
-          curl -L -o android-ndk-r25c-linux.zip https://dl.google.com/android/repository/android-ndk-r25c-linux.zip
-          7z -oandroid-ndk -snld x android-ndk-r25c-linux.zip
-          ln -s "$PWD/android-ndk/android-ndk-r25c" "$ANDROID_SDK_ROOT/ndk/25.2.9519653"
-          echo "sdk.dir=$ANDROID_SDK_ROOT" > android/local.properties
-          curl -L -o gradle-8.11.1-bin.zip https://services.gradle.org/distributions/gradle-8.11.1-bin.zip
-          mkdir -p gradle
-          7z -ogradle x gradle-8.11.1-bin.zip
-          cd android
-          ../gradle/gradle-8.11.1/bin/gradle assembleRelease
-          cp app/build/outputs/apk/release/HyperHLE-Fork-release.apk ../HyperHLE-Fixed-Sims-Keyboard.apk
+          CMAKE: ${{ github.workspace }}/vendor/cmake/bin/cmake
+        run: cd android && ../gradle/gradle-8.11.1/bin/gradle assembleRelease && mv app/build/outputs/apk/release/HyperHLE-Fork-release.apk ../HyperHLE-Fixed-Sims-Keyboard.apk
 
-      - name: Upload fixed APK artifact
-        uses: actions/upload-artifact@v4
+      - name: Verify real APK
+        run: |
+          test -s HyperHLE-Fixed-Sims-Keyboard.apk
+          unzip -l HyperHLE-Fixed-Sims-Keyboard.apk | grep -q AndroidManifest.xml
+          unzip -l HyperHLE-Fixed-Sims-Keyboard.apk | grep -q 'lib/arm64-v8a'
+
+      - name: Upload APK
+        uses: actions/upload-artifact@main
         with:
           name: HyperHLE-Fixed-Sims-Keyboard-AArch64
-          path: hyperhle/HyperHLE-Fixed-Sims-Keyboard.apk
+          path: HyperHLE-Fixed-Sims-Keyboard.apk
 
-      - name: Create/update GitHub Release and attach APK
-        uses: softprops/action-gh-release@v2
+      - name: Attach APK to Release
+        uses: softprops/action-gh-release@master
         with:
           tag_name: hyperhle-fixed-latest
           name: HyperHLE Fixed APK - Latest
-          body: |
-            Automatically built HyperHLE Android APK with the UITextField/Android IME
-            re-entry compatibility fix for The Sims 3: Ambitions character-name input.
-          files: hyperhle/HyperHLE-Fixed-Sims-Keyboard.apk
+          body: HyperHLE Android AArch64 APK build.
+          files: HyperHLE-Fixed-Sims-Keyboard.apk
           prerelease: true
           make_latest: true
           fail_on_unmatched_files: true
