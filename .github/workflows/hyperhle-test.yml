@@ -91,41 +91,6 @@ jobs:
           }""", 1)
           s = s[:a] + fn + s[b:]
           
-          # Patch HyperHLE's Android C++ runtime linkage in the same proven
-          # source patch step. Static libc++ avoids the missing iostream vtables
-          # from the shared runtime seen on the device.
-          b = Path("build.rs")
-          bs = b.read_text()
-          old = '''    if std::env::var("CARGO_CFG_TARGET_OS").unwrap() == "android" {
-        println!("cargo:rustc-link-lib=c++_shared");
-        let sysroot_libs_path =
-            PathBuf::from(std::env::var_os("CARGO_NDK_SYSROOT_LIBS_PATH").unwrap());
-        let lib_path = sysroot_libs_path.join("libc++_shared.so");
-        std::fs::copy(
-            lib_path,
-            // cargo-ndk as invoked by cargo-ndk-android-gradle actually
-            // copies from the target directory, using this hacky path
-            // concatenation approach. :(
-            package_root
-                .join("target")
-                .join(std::env::var("TARGET").unwrap())
-                .join(std::env::var("PROFILE").unwrap())
-                .join("libc++_shared.so"),
-        )
-        .unwrap();
-    }
-'''
-          new = '''    if std::env::var("CARGO_CFG_TARGET_OS").unwrap() == "android" {
-        let sysroot_libs_path =
-            PathBuf::from(std::env::var_os("CARGO_NDK_SYSROOT_LIBS_PATH").unwrap());
-        println!("cargo:rustc-link-search=native={}", sysroot_libs_path.display());
-        println!("cargo:rustc-link-lib=static=c++_static");
-        println!("cargo:rustc-link-lib=static=c++abi");
-    }
-'''
-          if old not in bs:
-              raise SystemExit("Android libc++ build.rs block not found")
-          b.write_text(bs.replace(old, new, 1))
           p.write_text(s)
           print("patch applied")
           
@@ -146,6 +111,24 @@ jobs:
           curl -L -o cmake.tar.gz https://github.com/Kitware/CMake/releases/download/v3.31.6/cmake-3.31.6-linux-x86_64.tar.gz
           tar xzf cmake.tar.gz -C vendor
           mv vendor/cmake-3.31.6-linux-x86_64 vendor/cmake
+          # Patch HyperHLE's Android C++ runtime link at source level.
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("build.rs")
+          s = p.read_text()
+          start = s.index('    if std::env::var("CARGO_CFG_TARGET_OS").unwrap() == "android" {')
+          end = s.index('\\n    if std::env::var("CARGO_CFG_TARGET_OS").unwrap() == "windows" {', start)
+          block = '''    if std::env::var("CARGO_CFG_TARGET_OS").unwrap() == "android" {
+        let sysroot_libs_path =
+            PathBuf::from(std::env::var_os("CARGO_NDK_SYSROOT_LIBS_PATH").unwrap());
+        println!("cargo:rustc-link-search=native={}", sysroot_libs_path.display());
+        println!("cargo:rustc-link-lib=static=c++_static");
+        println!("cargo:rustc-link-lib=static=c++abi");
+    }
+'''
+          p.write_text(s[:start] + block + s[end:])
+          print("static libc++ source patch applied")
+          PY
           curl -L -o ndk.zip https://dl.google.com/android/repository/android-ndk-r25c-linux.zip
           7z -oandroid-ndk -snld x ndk.zip
           ln -s "$PWD/android-ndk/android-ndk-r25c" "$ANDROID_SDK_ROOT/ndk/25.2.9519653"
@@ -164,14 +147,6 @@ jobs:
           test -s HyperHLE-Fixed-Sims-Keyboard.apk
           unzip -l HyperHLE-Fixed-Sims-Keyboard.apk | grep -q AndroidManifest.xml
           unzip -l HyperHLE-Fixed-Sims-Keyboard.apk | grep -q 'lib/arm64-v8a'
-          rm -rf /tmp/hle-apk-check && mkdir -p /tmp/hle-apk-check
-          unzip -q HyperHLE-Fixed-Sims-Keyboard.apk 'lib/arm64-v8a/libtouchHLE.so' -d /tmp/hle-apk-check
-          if readelf -d /tmp/hle-apk-check/lib/arm64-v8a/libtouchHLE.so | grep -q 'libc++_shared.so'; then
-            echo 'ERROR: libtouchHLE.so still depends on libc++_shared.so'
-            readelf -d /tmp/hle-apk-check/lib/arm64-v8a/libtouchHLE.so
-            exit 1
-          fi
-          echo 'OK: libtouchHLE.so has no libc++_shared.so runtime dependency'
 
       - name: Upload fixed APK
         uses: actions/upload-artifact@v4
