@@ -1,9 +1,9 @@
 TARGET = simsambitions
-OBJS = src/platform/psp/main.o
+OBJS = src/platform/psp/main.o src/engine/m3g_loader.o
 
 CFLAGS = -O2 -G0 -Wall -Wextra
 CXXFLAGS = $(CFLAGS) -fno-exceptions -fno-rtti
-LIBS = -lpspdebug -lpspdisplay -lpspctrl -lpspiofilemgr
+LIBS = -lpspdebug -lpspdisplay -lpspctrl -lpspiofilemgr -lz
 
 EXTRA_TARGETS = EBOOT.PBP
 PSP_EBOOT_TITLE = The Sims 3: Ambitions PSP Engine Bring-up
