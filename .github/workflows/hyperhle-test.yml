@@ -1,0 +1,14 @@
+name: HyperHLE workflow test
+
+on:
+  push:
+    paths:
+      - ".github/workflows/hyperhle-test.yml"
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo "workflow-valid"
