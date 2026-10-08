@@ -1,0 +1,30 @@
+name: PSP build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up PSPDEV
+        uses: docker://pspdev/pspdev:latest
+
+      - name: Check PSP toolchain
+        run: |
+          echo "PSP build environment configured"
+          psp-gcc --version
+          psp-config --pspsdk-path || true
+
+      - name: Build project
+        run: |
+          if [ -f Makefile ]; then
+            make
+          else
+            echo "No Makefile yet; bootstrap stage only."
+          fi
