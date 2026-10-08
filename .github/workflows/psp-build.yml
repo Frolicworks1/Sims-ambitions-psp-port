@@ -1,30 +1,48 @@
-name: PSP build
+name: PSP Build
 
 on:
   push:
+    branches: [ main ]
   pull_request:
+    branches: [ main ]
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    container:
+      image: pspdev/pspdev:latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up PSPDEV
-        uses: docker://pspdev/pspdev:latest
-
-      - name: Check PSP toolchain
+      - name: Verify PSP toolchain
         run: |
-          echo "PSP build environment configured"
+          export PSPDEV=/usr/local/pspdev
+          export PATH="$PSPDEV/bin:$PATH"
           psp-gcc --version
-          psp-config --pspsdk-path || true
+          psp-config --pspsdk-path
 
-      - name: Build project
+      - name: Build ELF and EBOOT.PBP
         run: |
-          if [ -f Makefile ]; then
-            make
-          else
-            echo "No Makefile yet; bootstrap stage only."
-          fi
+          export PSPDEV=/usr/local/pspdev
+          export PATH="$PSPDEV/bin:$PATH"
+          make clean
+          make -j2
+          test -s simsambitions.elf
+          test -s EBOOT.PBP
+
+      - name: Inspect outputs
+        run: |
+          file simsambitions.elf EBOOT.PBP
+          sha256sum simsambitions.elf EBOOT.PBP
+
+      - name: Upload PSP build
+        uses: actions/upload-artifact@v4
+        with:
+          name: sims-ambitions-psp-bootstrap
+          path: |
+            EBOOT.PBP
+            simsambitions.elf
+          if-no-files-found: error
