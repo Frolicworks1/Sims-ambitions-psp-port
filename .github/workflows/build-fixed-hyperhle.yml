@@ -28,8 +28,9 @@ jobs:
 
       - name: Patch UITextField IME notification re-entry
         working-directory: hyperhle
-        shell: python
+        shell: bash
         run: |
+          python3 - <<'PY'
           from pathlib import Path
           p = Path("src/frameworks/uikit/ui_view/ui_control/ui_text_field.rs")
           s = p.read_text()
@@ -77,6 +78,7 @@ jobs:
           patch_handler("handle_backspace", "handle_return")
           p.write_text(s)
           print("UITextField IME re-entry patch applied")
+          PY
 
       - name: Build Android AArch64 APK
         working-directory: hyperhle
