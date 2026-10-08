@@ -91,18 +91,11 @@ jobs:
           }""", 1)
           s = s[:a] + fn + s[b:]
           
-          p.write_text(s)
-          print("patch applied")
-          
-          PY
-
-      - name: Patch Android C++ runtime linkage
-        working-directory: hyperhle
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path("build.rs")
-          s = p.read_text()
+          # Patch HyperHLE's Android C++ runtime linkage in the same proven
+          # source patch step. Static libc++ avoids the missing iostream vtables
+          # from the shared runtime seen on the device.
+          b = Path("build.rs")
+          bs = b.read_text()
           old = '''    if std::env::var("CARGO_CFG_TARGET_OS").unwrap() == "android" {
         println!("cargo:rustc-link-lib=c++_shared");
         let sysroot_libs_path =
@@ -123,10 +116,6 @@ jobs:
     }
 '''
           new = '''    if std::env::var("CARGO_CFG_TARGET_OS").unwrap() == "android" {
-        // Dynarmic is C++ and uses libc++ iostream RTTI/vtables. The Android
-        // shared runtime supplied by cargo-ndk does not export all of the
-        // vtables this build needs, so link the NDK's static libc++ into
-        // libtouchHLE.so instead of depending on libc++_shared.so at runtime.
         let sysroot_libs_path =
             PathBuf::from(std::env::var_os("CARGO_NDK_SYSROOT_LIBS_PATH").unwrap());
         println!("cargo:rustc-link-search=native={}", sysroot_libs_path.display());
@@ -134,10 +123,12 @@ jobs:
         println!("cargo:rustc-link-lib=static=c++abi");
     }
 '''
-          if old not in s:
+          if old not in bs:
               raise SystemExit("Android libc++ build.rs block not found")
-          p.write_text(s.replace(old, new, 1))
-          print("Android C++ runtime patch applied")
+          b.write_text(bs.replace(old, new, 1))
+          p.write_text(s)
+          print("patch applied")
+          
           PY
 
       - name: Build Debug APK
