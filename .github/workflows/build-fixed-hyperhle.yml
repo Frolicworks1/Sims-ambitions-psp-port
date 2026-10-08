@@ -1,116 +1,68 @@
 name: Build fixed HyperHLE Android APK
+
 on:
   push:
-    branches: [main]
+    paths:
+      - ".github/workflows/build-fixed-hyperhle.yml"
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  build-android:
+  build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout HyperHLE
-        uses: actions/checkout@main
+      - name: Checkout HyperHLE source
+        uses: actions/checkout@v4
         with:
           repository: KlugKlugTG/HyperHLE-Fork
           ref: trunk
+          path: hyperhle
           submodules: recursive
           fetch-depth: 0
           fetch-tags: true
 
-      - name: Cache Boost
-        id: cache-boost
-        uses: actions/cache@main
-        with:
-          path: vendor/boost
-          key: boost_1_81_0
-      - if: steps.cache-boost.outputs.cache-hit != 'true'
-        run: curl -L -o boost_1_81_0.7z https://archives.boost.io/release/1.81.0/source/boost_1_81_0.7z
-      - if: steps.cache-boost.outputs.cache-hit != 'true'
-        run: mkdir -p vendor && 7z -ovendor x boost_1_81_0.7z && mv vendor/boost_1_81_0 vendor/boost
-
-      - name: Cache CMake
-        id: cache-cmake
-        uses: actions/cache@main
-        with:
-          path: vendor/cmake
-          key: cmake_3_31_6_linux
-      - if: steps.cache-cmake.outputs.cache-hit != 'true'
-        run: curl -L -O https://github.com/Kitware/CMake/releases/download/v3.31.6/cmake-3.31.6-linux-x86_64.tar.gz
-      - if: steps.cache-cmake.outputs.cache-hit != 'true'
-        run: tar xzf cmake-3.31.6-linux-x86_64.tar.gz -C vendor && mv vendor/cmake-3.31.6-linux-x86_64 vendor/cmake
-
-      - name: Install Android target
-        run: rustup target add aarch64-linux-android
-      - name: Install cargo-ndk
-        run: cargo install cargo-ndk@3.5.4
-
-      - name: Cache Gradle
-        id: cache-gradle
-        uses: actions/cache@main
-        with:
-          path: gradle
-          key: gradle-8.11.1
-      - if: steps.cache-gradle.outputs.cache-hit != 'true'
-        run: curl -L -o gradle-8.11.1-bin.zip https://services.gradle.org/distributions/gradle-8.11.1-bin.zip
-      - if: steps.cache-gradle.outputs.cache-hit != 'true'
-        run: 7z -ogradle x gradle-8.11.1-bin.zip
-
-      - name: Cache Android NDK
-        id: cache-ndk
-        uses: actions/cache@main
-        with:
-          path: android-ndk
-          key: android-ndk-r25c
-      - if: steps.cache-ndk.outputs.cache-hit != 'true'
-        run: curl -L -o android-ndk-r25c-linux.zip https://dl.google.com/android/repository/android-ndk-r25c-linux.zip
-      - if: steps.cache-ndk.outputs.cache-hit != 'true'
-        run: 7z -oandroid-ndk -snld x android-ndk-r25c-linux.zip
-
-      - name: Link NDK
-        run: ln -s $PWD/android-ndk/android-ndk-r25c $ANDROID_SDK_ROOT/ndk/25.2.9519653
-      - name: Android local.properties
-        run: echo sdk.dir=$ANDROID_SDK_ROOT > android/local.properties
-
-      - name: Patch HyperHLE UITextField for Sims keyboard re-entrancy
-        shell: bash
+      - name: Patch UITextField IME re-entry
+        working-directory: hyperhle
+        shell: python
         run: |
-          python3 - <<'PY'
           from pathlib import Path
           p = Path("src/frameworks/uikit/ui_view/ui_control/ui_text_field.rs")
           s = p.read_text()
-          s = s.replace("    content_vertical_alignment: NSInteger,\n", "    content_vertical_alignment: NSInteger,\n    text_input_in_progress: bool,\n", 1)
-          s = s.replace("            content_vertical_alignment: 0,\n", "            content_vertical_alignment: 0,\n            text_input_in_progress: false,\n", 1)
-          old = '''- (())setText:(id)text {
+          marker = "    content_vertical_alignment: NSInteger,\\n"
+          if "text_input_in_progress: bool" not in s:
+              s = s.replace(marker, marker + "    text_input_in_progress: bool,\\n", 1)
+          marker = "            content_vertical_alignment: 0,\\n"
+          if "text_input_in_progress: false" not in s:
+              s = s.replace(marker, marker + "            text_input_in_progress: false,\\n", 1)
+
+          start = s.index("- (())setText:(id)text {")
+          end = s.index("\\n}\\n\\n- (id)attributedText", start) + 2
+          s = s[:start] + """- (())setText:(id)text {
+    let suppress = env.objc.borrow::<UITextFieldHostObject>(this).text_input_in_progress;
     let text_label = env.objc.borrow::<UITextFieldHostObject>(this).text_label;
     let _: () = msg![env; text_label setText:text];
-    let center: id = msg_class![env; NSNotificationCenter defaultCenter];
-    let name = ns_string::get_static_str(env, UITextFieldTextDidChangeNotification);
-    let _: () = msg![env; center postNotificationName:name object:this userInfo:nil];
-}'''
-          new = '''- (())setText:(id)text {
-    let suppress_notification = env.objc.borrow::<UITextFieldHostObject>(this).text_input_in_progress;
-    let text_label = env.objc.borrow::<UITextFieldHostObject>(this).text_label;
-    let _: () = msg![env; text_label setText:text];
-    if !suppress_notification {
+    if !suppress {
         let center: id = msg_class![env; NSNotificationCenter defaultCenter];
         let name = ns_string::get_static_str(env, UITextFieldTextDidChangeNotification);
         let _: () = msg![env; center postNotificationName:name object:this userInfo:nil];
     }
-}'''
-          if old not in s: raise SystemExit("setText block not found")
-          s = s.replace(old, new, 1)
-          start = s.index("pub fn handle_text("); end = s.index("\npub fn handle_backspace(", start)
-          new_text = '''pub fn handle_text(env: &mut Environment, text_field: id, text: String) {
+}""" + s[end:]
+
+          def replace_handler(name, next_name, body):
+              nonlocal s
+              start = s.index("pub fn " + name)
+              end = s.index("\\npub fn " + next_name, start)
+              s = s[:start] + body + s[end:]
+
+          replace_handler("handle_text", "handle_backspace", """pub fn handle_text(env: &mut Environment, text_field: id, text: String) {
     if env.objc.borrow::<UITextFieldHostObject>(text_field).text_input_in_progress { return; }
     env.objc.borrow_mut::<UITextFieldHostObject>(text_field).text_input_in_progress = true;
-
     let txt = ns_string::from_rust_string(env, text);
     let text_label = env.objc.borrow::<UITextFieldHostObject>(text_field).text_label;
-    let mut curr_text: id = msg![env; text_label text];
-    if curr_text == nil { curr_text = ns_string::get_static_str(env, ""); }
+    let curr_text: id = msg![env; text_label text];
+    let curr_text = if curr_text == nil { ns_string::get_static_str(env, "") } else { curr_text };
     let len: NSUInteger = msg![env; curr_text length];
     let range = NSRange { location: len, length: 0 };
     let delegate = env.objc.borrow::<UITextFieldHostObject>(text_field).delegate;
@@ -132,11 +84,9 @@ jobs:
     }
     release(env, txt);
     env.objc.borrow_mut::<UITextFieldHostObject>(text_field).text_input_in_progress = false;
-}
-'''
-          s = s[:start] + new_text + s[end:]
-          start = s.index("pub fn handle_backspace("); end = s.index("\npub fn handle_return(", start)
-          new_back = '''pub fn handle_backspace(env: &mut Environment, text_field: id) {
+}""")
+
+          replace_handler("handle_backspace", "handle_return", """pub fn handle_backspace(env: &mut Environment, text_field: id) {
     if env.objc.borrow::<UITextFieldHostObject>(text_field).text_input_in_progress { return; }
     let text_label = env.objc.borrow::<UITextFieldHostObject>(text_field).text_label;
     let curr_text: id = msg![env; text_label text];
@@ -162,45 +112,53 @@ jobs:
         let _: () = msg![env; center postNotificationName:name object:text_field userInfo:nil];
     }
     env.objc.borrow_mut::<UITextFieldHostObject>(text_field).text_input_in_progress = false;
-}
-'''
-          s = s[:start] + new_back + s[end:]
+}""")
+
           p.write_text(s)
-          PY
+          print("IME re-entry guard applied")
 
-      - name: Verify UITextField patch
-        run: |
-          grep -q 'text_input_in_progress' src/frameworks/uikit/ui_view/ui_control/ui_text_field.rs
-          grep -q 'UITextFieldTextDidChangeNotification' src/frameworks/uikit/ui_view/ui_control/ui_text_field.rs
-
-      - name: Build APK
+      - name: Build Android AArch64 APK
+        working-directory: hyperhle
+        shell: bash
         env:
           HYPERHLE_KEYSTORE_B64: ${{ secrets.HYPERHLE_KEYSTORE_B64 }}
           HYPERHLE_KEYSTORE_PASSWORD: ${{ secrets.HYPERHLE_KEYSTORE_PASSWORD }}
           HYPERHLE_KEY_ALIAS: ${{ secrets.HYPERHLE_KEY_ALIAS }}
           ANDROID_NDK_ROOT: /usr/local/lib/android/sdk/ndk/25.2.9519653
-          CMAKE: ${{ github.workspace }}/vendor/cmake/bin/cmake
-        run: cd android && ../gradle/gradle-8.11.1/bin/gradle assembleRelease && mv app/build/outputs/apk/release/HyperHLE-Fork-release.apk ../HyperHLE-Fixed-Sims-Keyboard.apk
+        run: |
+          set -euxo pipefail
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq p7zip-full
+          cargo install cargo-ndk@3.5.4
+          rustup target add aarch64-linux-android
+          mkdir -p vendor
+          curl -L -o boost_1_81_0.7z https://archives.boost.io/release/1.81.0/source/boost_1_81_0.7z
+          7z -ovendor x boost_1_81_0.7z
+          mv vendor/boost_1_81_0 vendor/boost
+          curl -L -o cmake.tar.gz https://github.com/Kitware/CMake/releases/download/v3.31.6/cmake-3.31.6-linux-x86_64.tar.gz
+          tar xzf cmake.tar.gz -C vendor
+          mv vendor/cmake-3.31.6-linux-x86_64 vendor/cmake
+          mkdir -p android-ndk
+          curl -L -o android-ndk-r25c-linux.zip https://dl.google.com/android/repository/android-ndk-r25c-linux.zip
+          7z -oandroid-ndk -snld x android-ndk-r25c-linux.zip
+          ln -s "$PWD/android-ndk/android-ndk-r25c" "$ANDROID_SDK_ROOT/ndk/25.2.9519653"
+          echo "sdk.dir=$ANDROID_SDK_ROOT" > android/local.properties
+          curl -L -o gradle-8.11.1-bin.zip https://services.gradle.org/distributions/gradle-8.11.1-bin.zip
+          mkdir -p gradle
+          7z -ogradle x gradle-8.11.1-bin.zip
+          cd android
+          ../gradle/gradle-8.11.1/bin/gradle assembleRelease
+          cp app/build/outputs/apk/release/HyperHLE-Fork-release.apk ../HyperHLE-Fixed-Sims-Keyboard.apk
 
       - name: Verify real APK
+        working-directory: hyperhle
         run: |
           test -s HyperHLE-Fixed-Sims-Keyboard.apk
           unzip -l HyperHLE-Fixed-Sims-Keyboard.apk | grep -q AndroidManifest.xml
           unzip -l HyperHLE-Fixed-Sims-Keyboard.apk | grep -q 'lib/arm64-v8a'
 
-      - name: Upload APK
-        uses: actions/upload-artifact@main
+      - name: Upload fixed APK
+        uses: actions/upload-artifact@v4
         with:
           name: HyperHLE-Fixed-Sims-Keyboard-AArch64
-          path: HyperHLE-Fixed-Sims-Keyboard.apk
-
-      - name: Attach APK to Release
-        uses: softprops/action-gh-release@master
-        with:
-          tag_name: hyperhle-fixed-latest
-          name: HyperHLE Fixed APK - Latest
-          body: HyperHLE Android AArch64 APK build.
-          files: HyperHLE-Fixed-Sims-Keyboard.apk
-          prerelease: true
-          make_latest: true
-          fail_on_unmatched_files: true
+          path: hyperhle/HyperHLE-Fixed-Sims-Keyboard.apk
