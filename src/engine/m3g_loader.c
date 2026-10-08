@@ -12,7 +12,7 @@ typedef struct {
     uint32_t object_bytes;
 } M3GSection;
 
-static uint32_t m3g_be32(const uint8_t *p)
+static uint32_t m3g_u32(const uint8_t *p)
 {
     return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
            ((uint32_t)p[2] << 8) | p[3];
@@ -22,15 +22,15 @@ int m3g_read_section(const uint8_t *data, size_t size, M3GSection *out)
 {
     if (!data || !out || size < 17) return -1;
     out->compression = data[0];
-    out->total_length = m3g_be32(data + 1);
-    out->uncompressed_length = m3g_be32(data + 5);
+    out->total_length = m3g_u32(data + 1);
+    out->uncompressed_length = m3g_u32(data + 5);
 
     if (out->total_length < 17 || out->total_length > size) return -2;
     if (out->compression > 1) return -3;
 
     out->object_bytes = out->total_length - 13 - 4;
     out->objects = data + 9;
-    out->checksum = m3g_be32(data + out->total_length - 4);
+    out->checksum = m3g_u32(data + out->total_length - 4);
     return 0;
 }
 
