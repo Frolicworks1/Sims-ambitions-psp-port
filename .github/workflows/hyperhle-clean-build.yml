@@ -1,0 +1,131 @@
+name: HyperHLE Fixed APK - Clean Android Build
+
+on:
+  push:
+    paths:
+      - ".github/workflows/hyperhle-clean-build.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout HyperHLE
+        uses: actions/checkout@v4
+        with:
+          repository: KlugKlugTG/HyperHLE-Fork
+          ref: trunk
+          path: hyperhle
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Patch UITextField and Android libc++
+        working-directory: hyperhle
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("src/frameworks/uikit/ui_view/ui_control/ui_text_field.rs")
+          s = p.read_text()
+          field = "    content_vertical_alignment: NSInteger,\n"
+          if "text_input_in_progress: bool" not in s:
+              s = s.replace(field, field + "    text_input_in_progress: bool,\n", 1)
+              s = s.replace("            content_vertical_alignment: 0,\n", "            content_vertical_alignment: 0,\n            text_input_in_progress: false,\n", 1)
+          old = """- (())setText:(id)text {
+              let text_label = env.objc.borrow::<UITextFieldHostObject>(this).text_label;
+              let _: () = msg![env; text_label setText:text];
+              let center: id = msg_class![env; NSNotificationCenter defaultCenter];
+              let name = ns_string::get_static_str(env, UITextFieldTextDidChangeNotification);
+              let _: () = msg![env; center postNotificationName:name object:this userInfo:nil];
+          }"""
+          new = """- (())setText:(id)text {
+              let suppress = env.objc.borrow::<UITextFieldHostObject>(this).text_input_in_progress;
+              let text_label = env.objc.borrow::<UITextFieldHostObject>(this).text_label;
+              let _: () = msg![env; text_label setText:text];
+              if !suppress {
+                  let center: id = msg_class![env; NSNotificationCenter defaultCenter];
+                  let name = ns_string::get_static_str(env, UITextFieldTextDidChangeNotification);
+                  let _: () = msg![env; center postNotificationName:name object:this userInfo:nil];
+              }
+          }"""
+          if old not in s:
+              raise SystemExit("UITextField setText block not found")
+          s = s.replace(old, new, 1)
+          a = s.index("pub fn handle_text(")
+          b = s.index("\npub fn handle_backspace(", a)
+          fn = s[a:b]
+          sig = "pub fn handle_text(env: &mut Environment, text_field: id, text: String) {"
+          fn = fn.replace(sig, sig + "\n    if env.objc.borrow::<UITextFieldHostObject>(text_field).text_input_in_progress { return; }\n    env.objc.borrow_mut::<UITextFieldHostObject>(text_field).text_input_in_progress = true;", 1)
+          fn = fn.replace("        release(env, new_text);", "        release(env, new_text);\n        let center: id = msg_class![env; NSNotificationCenter defaultCenter];\n        let name = ns_string::get_static_str(env, UITextFieldTextDidChangeNotification);\n        let _: () = msg![env; center postNotificationName:name object:text_field userInfo:nil];", 1)
+          fn = fn.replace("\n}", "\n    release(env, txt);\n    env.objc.borrow_mut::<UITextFieldHostObject>(text_field).text_input_in_progress = false;\n}", 1)
+          s = s[:a] + fn + s[b:]
+          a = s.index("pub fn handle_backspace(")
+          b = s.index("\npub fn handle_return(", a)
+          fn = s[a:b]
+          sig = "pub fn handle_backspace(env: &mut Environment, text_field: id) {"
+          fn = fn.replace(sig, sig + "\n    if env.objc.borrow::<UITextFieldHostObject>(text_field).text_input_in_progress { return; }", 1)
+          fn = fn.replace("    let range = NSRange { location: len - 1, length: 1 };", "    let range = NSRange { location: len - 1, length: 1 };\n    env.objc.borrow_mut::<UITextFieldHostObject>(text_field).text_input_in_progress = true;", 1)
+          fn = fn.replace("        let _: () = msg![env; text_field setNeedsDisplay];", "        let _: () = msg![env; text_field setNeedsDisplay];\n        let center: id = msg_class![env; NSNotificationCenter defaultCenter];\n        let name = ns_string::get_static_str(env, UITextFieldTextDidChangeNotification);\n        let _: () = msg![env; center postNotificationName:name object:text_field userInfo:nil];", 1)
+          fn = fn.replace("\n}", "\n    env.objc.borrow_mut::<UITextFieldHostObject>(text_field).text_input_in_progress = false;\n}", 1)
+          s = s[:a] + fn + s[b:]
+          p.write_text(s)
+
+          p = Path("build.rs")
+          s = p.read_text()
+          start = s.index('    if std::env::var("CARGO_CFG_TARGET_OS").unwrap() == "android" {')
+          end = s.index('\n    if std::env::var("CARGO_CFG_TARGET_OS").unwrap() == "windows" {', start)
+          block = '''    if std::env::var("CARGO_CFG_TARGET_OS").unwrap() == "android" {
+              let sysroot_libs_path =
+                  PathBuf::from(std::env::var_os("CARGO_NDK_SYSROOT_LIBS_PATH").unwrap());
+              println!("cargo:rustc-link-search=native={}", sysroot_libs_path.display());
+              println!("cargo:rustc-link-lib=static=c++_static");
+              println!("cargo:rustc-link-lib=static=c++abi");
+          }
+          '''
+          p.write_text(s[:start] + block + s[end:])
+          print("All source patches applied")
+          PY
+
+      - name: Build Debug APK
+        working-directory: hyperhle
+        run: |
+          set -euxo pipefail
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq p7zip-full
+          cargo install cargo-ndk@3.5.4
+          rustup target add aarch64-linux-android
+          mkdir -p vendor gradle android-ndk
+          curl -L -o boost.7z https://archives.boost.io/release/1.81.0/source/boost_1_81_0.7z
+          7z -ovendor x boost.7z
+          mv vendor/boost_1_81_0 vendor/boost
+          curl -L -o cmake.tar.gz https://github.com/Kitware/CMake/releases/download/v3.31.6/cmake-3.31.6-linux-x86_64.tar.gz
+          tar xzf cmake.tar.gz -C vendor
+          mv vendor/cmake-3.31.6-linux-x86_64 vendor/cmake
+          curl -L -o ndk.zip https://dl.google.com/android/repository/android-ndk-r25c-linux.zip
+          7z -oandroid-ndk -snld x ndk.zip
+          ln -s "$PWD/android-ndk/android-ndk-r25c" "$ANDROID_SDK_ROOT/ndk/25.2.9519653"
+          echo "sdk.dir=$ANDROID_SDK_ROOT" > android/local.properties
+          keytool -genkeypair -keystore android/debug.keystore -storepass android -alias androiddebugkey -keypass android -dname "CN=Android Debug,O=Android,C=US" -validity 10000 -keyalg RSA -keysize 2048
+          curl -L -o gradle.zip https://services.gradle.org/distributions/gradle-8.11.1-bin.zip
+          7z -ogradle x gradle.zip
+          cd android
+          ../gradle/gradle-8.11.1/bin/gradle clean assembleDebug
+          cp app/build/outputs/apk/debug/HyperHLE-Fork-debug.apk ../HyperHLE-Fixed-Sims-Keyboard.apk
+
+      - name: Verify native runtime
+        working-directory: hyperhle
+        run: |
+          set -euxo pipefail
+          test -s HyperHLE-Fixed-Sims-Keyboard.apk
+          rm -rf /tmp/hle-apk-check && mkdir -p /tmp/hle-apk-check
+          unzip -q HyperHLE-Fixed-Sims-Keyboard.apk 'lib/arm64-v8a/libtouchHLE.so' -d /tmp/hle-apk-check
+          ! readelf -d /tmp/hle-apk-check/lib/arm64-v8a/libtouchHLE.so | grep -q 'libc++_shared.so'
+          echo "Verified: libtouchHLE.so has no libc++_shared.so dependency"
+
+      - name: Upload fixed APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: HyperHLE-Fixed-Sims-Keyboard-AArch64
+          path: hyperhle/HyperHLE-Fixed-Sims-Keyboard.apk
