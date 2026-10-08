@@ -10,5 +10,12 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - run: echo "workflow-valid"
+      - name: Checkout HyperHLE
+        uses: actions/checkout@v4
+        with:
+          repository: KlugKlugTG/HyperHLE-Fork
+          ref: trunk
+          path: hyperhle
+          submodules: recursive
+          fetch-depth: 0
+      - run: test -f hyperhle/Cargo.toml && echo "checkout-ok"
