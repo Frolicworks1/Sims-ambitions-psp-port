@@ -8,7 +8,7 @@
 PSP_MODULE_INFO("SimsAmbitionsPSP", 0, 0, 1);
 PSP_MAIN_THREAD_ATTR(PSP_THREAD_ATTR_USER);
 
-static uint32_t le32(const unsigned char *p)
+static uint32_t be32(const unsigned char *p)
 {
     return ((uint32_t)p[0]) |
            ((uint32_t)p[1] << 8) |
@@ -39,7 +39,7 @@ static int inspect_m3g(const char *path)
 
     pspDebugScreenPrintf("M3G: valid Java ME 3D file\n");
     pspDebugScreenPrintf("Compression: %u\n", (unsigned)h[12]);
-    pspDebugScreenPrintf("Section size: %lu\n", (unsigned long)le32(&h[13]));
+    pspDebugScreenPrintf("Section size: %lu\n", (unsigned long)be32(&h[13]));
     pspDebugScreenPrintf("Version: %u.%u\n", (unsigned)h[26], (unsigned)h[27]);
     return 0;
 }
