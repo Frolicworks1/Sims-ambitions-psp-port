@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -15,6 +15,7 @@ jobs:
     steps:
       - name: Checkout launcher repository
         uses: actions/checkout@v4
+
       - name: Checkout HyperHLE source
         uses: actions/checkout@v4
         with:
@@ -24,6 +25,7 @@ jobs:
           submodules: recursive
           fetch-depth: 0
           fetch-tags: true
+
       - name: Patch UITextField IME notification re-entry
         working-directory: hyperhle
         shell: python
@@ -91,7 +93,7 @@ jobs:
           cargo install cargo-ndk@3.5.4
           rustup target add aarch64-linux-android
           mkdir -p vendor
-          curl -L -o boost_1_81_0.7z https://archives.boost.io/release/1.81.0/source/boost_1_81_0.7z
+          curl -L -o boost_1_81_0.7z https://archives.boost.io/release/1.81.0/source/boost_1.81.0.7z
           7z -ovendor x boost_1_81_0.7z
           mv vendor/boost_1_81_0 vendor/boost
           curl -L -o cmake.tar.gz https://github.com/Kitware/CMake/releases/download/v3.31.6/cmake-3.31.6-linux-x86_64.tar.gz
@@ -109,10 +111,21 @@ jobs:
           ../gradle/gradle-8.11.1/bin/gradle assembleRelease
           cp app/build/outputs/apk/release/HyperHLE-Fork-release.apk ../HyperHLE-Fixed-Sims-Keyboard.apk
 
-      - name: Upload fixed APK
+      - name: Upload fixed APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: HyperHLE-Fixed-Sims-Keyboard-AArch64
           path: hyperhle/HyperHLE-Fixed-Sims-Keyboard.apk
 
-# Build target: Android AArch64 / Sims Ambitions keyboard compatibility
+      - name: Create/update GitHub Release and attach APK
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: hyperhle-fixed-latest
+          name: HyperHLE Fixed APK - Latest
+          body: |
+            Automatically built HyperHLE Android APK with the UITextField/Android IME
+            re-entry compatibility fix for The Sims 3: Ambitions character-name input.
+          files: hyperhle/HyperHLE-Fixed-Sims-Keyboard.apk
+          prerelease: true
+          make_latest: true
+          fail_on_unmatched_files: true
