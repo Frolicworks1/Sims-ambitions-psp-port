@@ -26,72 +26,74 @@ jobs:
           from pathlib import Path
           p = Path("src/frameworks/uikit/ui_view/ui_control/ui_text_field.rs")
           s = p.read_text()
+          
           field = "    content_vertical_alignment: NSInteger,\n"
           if "text_input_in_progress: bool" not in s:
               s = s.replace(field, field + "    text_input_in_progress: bool,\n", 1)
               init = "            content_vertical_alignment: 0,\n"
               s = s.replace(init, init + "            text_input_in_progress: false,\n", 1)
-
+          
           old = """- (())setText:(id)text {
-    let text_label = env.objc.borrow::<UITextFieldHostObject>(this).text_label;
-    let _: () = msg![env; text_label setText:text];
-    let center: id = msg_class![env; NSNotificationCenter defaultCenter];
-    let name = ns_string::get_static_str(env, UITextFieldTextDidChangeNotification);
-    let _: () = msg![env; center postNotificationName:name object:this userInfo:nil];
-}"""
+              let text_label = env.objc.borrow::<UITextFieldHostObject>(this).text_label;
+              let _: () = msg![env; text_label setText:text];
+              let center: id = msg_class![env; NSNotificationCenter defaultCenter];
+              let name = ns_string::get_static_str(env, UITextFieldTextDidChangeNotification);
+              let _: () = msg![env; center postNotificationName:name object:this userInfo:nil];
+          }"""
           new = """- (())setText:(id)text {
-    let suppress = env.objc.borrow::<UITextFieldHostObject>(this).text_input_in_progress;
-    let text_label = env.objc.borrow::<UITextFieldHostObject>(this).text_label;
-    let _: () = msg![env; text_label setText:text];
-    if !suppress {
-        let center: id = msg_class![env; NSNotificationCenter defaultCenter];
-        let name = ns_string::get_static_str(env, UITextFieldTextDidChangeNotification);
-        let _: () = msg![env; center postNotificationName:name object:this userInfo:nil];
-    }
-}"""
+              let suppress = env.objc.borrow::<UITextFieldHostObject>(this).text_input_in_progress;
+              let text_label = env.objc.borrow::<UITextFieldHostObject>(this).text_label;
+              let _: () = msg![env; text_label setText:text];
+              if !suppress {
+                  let center: id = msg_class![env; NSNotificationCenter defaultCenter];
+                  let name = ns_string::get_static_str(env, UITextFieldTextDidChangeNotification);
+                  let _: () = msg![env; center postNotificationName:name object:this userInfo:nil];
+              }
+          }"""
           if old not in s:
               raise SystemExit("setText block not found")
           s = s.replace(old, new, 1)
-
+          
           a = s.index("pub fn handle_text(")
           b = s.index("\npub fn handle_backspace(", a)
           fn = s[a:b]
           sig = "pub fn handle_text(env: &mut Environment, text_field: id, text: String) {"
           fn = fn.replace(sig, sig + """
-    if env.objc.borrow::<UITextFieldHostObject>(text_field).text_input_in_progress { return; }
-    env.objc.borrow_mut::<UITextFieldHostObject>(text_field).text_input_in_progress = true;""", 1)
+              if env.objc.borrow::<UITextFieldHostObject>(text_field).text_input_in_progress { return; }
+              env.objc.borrow_mut::<UITextFieldHostObject>(text_field).text_input_in_progress = true;""", 1)
           needle = "        release(env, new_text);"
           fn = fn.replace(needle, needle + """
-        let center: id = msg_class![env; NSNotificationCenter defaultCenter];
-        let name = ns_string::get_static_str(env, UITextFieldTextDidChangeNotification);
-        let _: () = msg![env; center postNotificationName:name object:text_field userInfo:nil];""", 1)
+                  let center: id = msg_class![env; NSNotificationCenter defaultCenter];
+                  let name = ns_string::get_static_str(env, UITextFieldTextDidChangeNotification);
+                  let _: () = msg![env; center postNotificationName:name object:text_field userInfo:nil];""", 1)
           fn = fn.replace("\n}", """
-    release(env, txt);
-    env.objc.borrow_mut::<UITextFieldHostObject>(text_field).text_input_in_progress = false;
-}""", 1)
+              release(env, txt);
+              env.objc.borrow_mut::<UITextFieldHostObject>(text_field).text_input_in_progress = false;
+          }""", 1)
           s = s[:a] + fn + s[b:]
-
+          
           a = s.index("pub fn handle_backspace(")
           b = s.index("\npub fn handle_return(", a)
           fn = s[a:b]
           sig = "pub fn handle_backspace(env: &mut Environment, text_field: id) {"
           fn = fn.replace(sig, sig + """
-    if env.objc.borrow::<UITextFieldHostObject>(text_field).text_input_in_progress { return; }""", 1)
+              if env.objc.borrow::<UITextFieldHostObject>(text_field).text_input_in_progress { return; }""", 1)
           needle = "    let range = NSRange { location: len - 1, length: 1 };"
           fn = fn.replace(needle, needle + """
-    env.objc.borrow_mut::<UITextFieldHostObject>(text_field).text_input_in_progress = true;""", 1)
+              env.objc.borrow_mut::<UITextFieldHostObject>(text_field).text_input_in_progress = true;""", 1)
           needle = "        let _: () = msg![env; text_field setNeedsDisplay];"
           fn = fn.replace(needle, needle + """
-        let center: id = msg_class![env; NSNotificationCenter defaultCenter];
-        let name = ns_string::get_static_str(env, UITextFieldTextDidChangeNotification);
-        let _: () = msg![env; center postNotificationName:name object:text_field userInfo:nil];""", 1)
+                  let center: id = msg_class![env; NSNotificationCenter defaultCenter];
+                  let name = ns_string::get_static_str(env, UITextFieldTextDidChangeNotification);
+                  let _: () = msg![env; center postNotificationName:name object:text_field userInfo:nil];""", 1)
           fn = fn.replace("\n}", """
-    env.objc.borrow_mut::<UITextFieldHostObject>(text_field).text_input_in_progress = false;
-}""", 1)
+              env.objc.borrow_mut::<UITextFieldHostObject>(text_field).text_input_in_progress = false;
+          }""", 1)
           s = s[:a] + fn + s[b:]
-
+          
           p.write_text(s)
           print("patch applied")
+          
           PY
 
       - name: Build Debug APK
@@ -118,6 +120,7 @@ jobs:
           cd android
           ../gradle/gradle-8.11.1/bin/gradle assembleDebug
           cp app/build/outputs/apk/debug/app-debug.apk ../HyperHLE-Fixed-Sims-Keyboard.apk
+          
 
       - name: Verify APK
         working-directory: hyperhle
