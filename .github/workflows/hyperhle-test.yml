@@ -115,6 +115,7 @@ jobs:
           7z -oandroid-ndk -snld x ndk.zip
           ln -s "$PWD/android-ndk/android-ndk-r25c" "$ANDROID_SDK_ROOT/ndk/25.2.9519653"
           echo "sdk.dir=$ANDROID_SDK_ROOT" > android/local.properties
+          keytool -genkeypair -keystore android/debug.keystore -storepass android -alias androiddebugkey -keypass android -dname "CN=Android Debug,O=Android,C=US" -validity 10000 -keyalg RSA -keysize 2048
           curl -L -o gradle.zip https://services.gradle.org/distributions/gradle-8.11.1-bin.zip
           7z -ogradle x gradle.zip
           cd android
