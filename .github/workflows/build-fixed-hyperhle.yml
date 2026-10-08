@@ -114,3 +114,5 @@ jobs:
         with:
           name: HyperHLE-Fixed-Sims-Keyboard-AArch64
           path: hyperhle/HyperHLE-Fixed-Sims-Keyboard.apk
+
+# Build target: Android AArch64 / Sims Ambitions keyboard compatibility
