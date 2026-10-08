@@ -12,14 +12,6 @@
 PSP_MODULE_INFO("SimsAmbitionsPSP", 0, 0, 1);
 PSP_MAIN_THREAD_ATTR(PSP_THREAD_ATTR_USER);
 
-static uint32_t le32(const unsigned char *p)
-{
-    return ((uint32_t)p[0]) |
-           ((uint32_t)p[1] << 8) |
-           ((uint32_t)p[2] << 16) |
-           ((uint32_t)p[3] << 24);
-}
-
 static int load_and_decode_m3g(const char *path)
 {
     static const unsigned char id[12] =
