@@ -21,7 +21,7 @@ static int load_and_decode_m3g(const char *path)
     if (fd < 0) return -1;
 
     SceOff end = sceIoLseek(fd, 0, PSP_SEEK_END);
-    if (end < 28 || end > 32 * 1024 * 1024) {
+    if (end < 29 || end > 32 * 1024 * 1024) {
         sceIoClose(fd);
         return -2;
     }
@@ -49,56 +49,97 @@ static int load_and_decode_m3g(const char *path)
         return -6;
     }
 
-    /* First section begins immediately after the 28-byte file header. */
-    const unsigned char *section = file + 28;
-    size_t section_size = size - 28;
-    M3GSection s;
+    /*
+     * M3G Section 0 begins immediately after the 12-byte file identifier.
+     * The first section is the mandatory uncompressed header object.
+     */
+    size_t off = 12;
+    unsigned section_count = 0;
+    unsigned total_objects = 0;
+    unsigned mesh_count = 0;
+    unsigned group_count = 0;
+    unsigned vertex_buffer_count = 0;
+    unsigned vertex_array_count = 0;
+    unsigned index_buffer_count = 0;
 
-    int rc = m3g_read_section(section, section_size, &s);
-    if (rc != 0) {
+    while (off + 17 <= size) {
+        M3GSection s;
+        int rc = m3g_read_section(file + off, size - off, &s);
+        if (rc != 0 || s.total_length == 0) {
+            free(file);
+            return -10 + rc;
+        }
+
+        size_t object_capacity = s.uncompressed_length;
+        if (object_capacity == 0)
+            object_capacity = s.object_bytes;
+
+        if (object_capacity > 24 * 1024 * 1024) {
+            free(file);
+            return -20;
+        }
+
+        unsigned char *objects = (unsigned char *)malloc(object_capacity);
+        if (!objects) {
+            free(file);
+            return -21;
+        }
+
+        int unpacked = m3g_unpack_objects(&s, objects, object_capacity);
+        if (unpacked < 0) {
+            free(objects);
+            free(file);
+            return -30 + unpacked;
+        }
+
+        unsigned counts[256];
+        int object_count = m3g_count_objects(
+            objects, (size_t)unpacked, counts, 256);
+        if (object_count < 0) {
+            free(objects);
+            free(file);
+            return -40 + object_count;
+        }
+
+        section_count++;
+        total_objects += (unsigned)object_count;
+        mesh_count += counts[14];
+        group_count += counts[9];
+        vertex_buffer_count += counts[21];
+        vertex_array_count += counts[20];
+        index_buffer_count += counts[11];
+
+        if (section_count == 1 && s.compression != 0) {
+            free(objects);
+            free(file);
+            return -50;
+        }
+
+        free(objects);
+        off += s.total_length;
+
+        if (off > size) {
+            free(file);
+            return -51;
+        }
+    }
+
+    if (off != size || section_count < 2) {
         free(file);
-        return -10 + rc;
+        return -52;
     }
 
     pspDebugScreenPrintf("M3G size: %lu bytes\n", (unsigned long)size);
-    pspDebugScreenPrintf("Section: %lu bytes, compression=%u\n",
-                         (unsigned long)s.total_length, (unsigned)s.compression);
+    pspDebugScreenPrintf("Sections: %u\n", section_count);
+    pspDebugScreenPrintf("Objects: %u\n", total_objects);
+    pspDebugScreenPrintf("Meshes=%u Groups=%u\n",
+                         mesh_count, group_count);
+    pspDebugScreenPrintf("VertexBuffers=%u VertexArrays=%u\n",
+                         vertex_buffer_count, vertex_array_count);
+    pspDebugScreenPrintf("TriangleStrips=%u\n", index_buffer_count);
 
-    size_t object_capacity = s.uncompressed_length;
-    if (object_capacity == 0) object_capacity = s.object_bytes;
-
-    unsigned char *objects = (unsigned char *)malloc(object_capacity);
-    if (!objects) {
-        free(file);
-        return -20;
-    }
-
-    int unpacked = m3g_unpack_objects(&s, objects, object_capacity);
-    if (unpacked < 0) {
-        free(objects);
-        free(file);
-        return -30 + unpacked;
-    }
-
-    unsigned counts[256];
-    int object_count = m3g_count_objects(objects, (size_t)unpacked,
-                                         counts, 256);
-    if (object_count < 0) {
-        free(objects);
-        free(file);
-        return -40 + object_count;
-    }
-
-    pspDebugScreenPrintf("Decoded object bytes: %d\n", unpacked);
-    pspDebugScreenPrintf("M3G objects: %d\n", object_count);
-    pspDebugScreenPrintf("Meshes=%u Groups=%u VertexBuffers=%u\n",
-                         counts[14], counts[9], counts[21]);
-    pspDebugScreenPrintf("VertexArrays=%u IndexBuffers=%u\n",
-                         counts[20], counts[11]);
-
-    free(objects);
     free(file);
-    return object_count;
+    return (int)total_objects;
 }
 
 int main(void)
