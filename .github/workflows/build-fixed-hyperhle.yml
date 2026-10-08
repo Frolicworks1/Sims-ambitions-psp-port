@@ -74,6 +74,105 @@ jobs:
       - name: Android local.properties
         run: echo sdk.dir=$ANDROID_SDK_ROOT > android/local.properties
 
+      - name: Patch HyperHLE UITextField for Sims keyboard re-entrancy
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("src/frameworks/uikit/ui_view/ui_control/ui_text_field.rs")
+          s = p.read_text()
+          s = s.replace("    content_vertical_alignment: NSInteger,\n", "    content_vertical_alignment: NSInteger,\n    text_input_in_progress: bool,\n", 1)
+          s = s.replace("            content_vertical_alignment: 0,\n", "            content_vertical_alignment: 0,\n            text_input_in_progress: false,\n", 1)
+          old = '''- (())setText:(id)text {
+    let text_label = env.objc.borrow::<UITextFieldHostObject>(this).text_label;
+    let _: () = msg![env; text_label setText:text];
+    let center: id = msg_class![env; NSNotificationCenter defaultCenter];
+    let name = ns_string::get_static_str(env, UITextFieldTextDidChangeNotification);
+    let _: () = msg![env; center postNotificationName:name object:this userInfo:nil];
+}'''
+          new = '''- (())setText:(id)text {
+    let suppress_notification = env.objc.borrow::<UITextFieldHostObject>(this).text_input_in_progress;
+    let text_label = env.objc.borrow::<UITextFieldHostObject>(this).text_label;
+    let _: () = msg![env; text_label setText:text];
+    if !suppress_notification {
+        let center: id = msg_class![env; NSNotificationCenter defaultCenter];
+        let name = ns_string::get_static_str(env, UITextFieldTextDidChangeNotification);
+        let _: () = msg![env; center postNotificationName:name object:this userInfo:nil];
+    }
+}'''
+          if old not in s: raise SystemExit("setText block not found")
+          s = s.replace(old, new, 1)
+          start = s.index("pub fn handle_text("); end = s.index("\npub fn handle_backspace(", start)
+          new_text = '''pub fn handle_text(env: &mut Environment, text_field: id, text: String) {
+    if env.objc.borrow::<UITextFieldHostObject>(text_field).text_input_in_progress { return; }
+    env.objc.borrow_mut::<UITextFieldHostObject>(text_field).text_input_in_progress = true;
+
+    let txt = ns_string::from_rust_string(env, text);
+    let text_label = env.objc.borrow::<UITextFieldHostObject>(text_field).text_label;
+    let mut curr_text: id = msg![env; text_label text];
+    if curr_text == nil { curr_text = ns_string::get_static_str(env, ""); }
+    let len: NSUInteger = msg![env; curr_text length];
+    let range = NSRange { location: len, length: 0 };
+    let delegate = env.objc.borrow::<UITextFieldHostObject>(text_field).delegate;
+    let mut should = true;
+    if delegate != nil && env.mem.read(delegate.cast()) != 0 {
+        let sel: SEL = env.objc.register_host_selector("textField:shouldChangeCharactersInRange:replacementString:".to_string(), &mut env.mem);
+        if msg![env; delegate respondsToSelector:sel] {
+            should = msg![env; delegate textField:text_field shouldChangeCharactersInRange:range replacementString:txt];
+        }
+    }
+    if should {
+        let new_text: id = msg![env; curr_text stringByAppendingString:txt];
+        let _: () = msg![env; text_field setText:new_text];
+        let _: () = msg![env; text_field setNeedsDisplay];
+        release(env, new_text);
+        let center: id = msg_class![env; NSNotificationCenter defaultCenter];
+        let name = ns_string::get_static_str(env, UITextFieldTextDidChangeNotification);
+        let _: () = msg![env; center postNotificationName:name object:text_field userInfo:nil];
+    }
+    release(env, txt);
+    env.objc.borrow_mut::<UITextFieldHostObject>(text_field).text_input_in_progress = false;
+}
+'''
+          s = s[:start] + new_text + s[end:]
+          start = s.index("pub fn handle_backspace("); end = s.index("\npub fn handle_return(", start)
+          new_back = '''pub fn handle_backspace(env: &mut Environment, text_field: id) {
+    if env.objc.borrow::<UITextFieldHostObject>(text_field).text_input_in_progress { return; }
+    let text_label = env.objc.borrow::<UITextFieldHostObject>(text_field).text_label;
+    let curr_text: id = msg![env; text_label text];
+    let len: NSUInteger = msg![env; curr_text length];
+    if len == 0 { return; }
+    env.objc.borrow_mut::<UITextFieldHostObject>(text_field).text_input_in_progress = true;
+    let range = NSRange { location: len - 1, length: 1 };
+    let empty = ns_string::get_static_str(env, "");
+    let delegate = env.objc.borrow::<UITextFieldHostObject>(text_field).delegate;
+    let mut should = true;
+    if delegate != nil && env.mem.read(delegate.cast()) != 0 {
+        let sel: SEL = env.objc.register_host_selector("textField:shouldChangeCharactersInRange:replacementString:".to_string(), &mut env.mem);
+        if msg![env; delegate respondsToSelector:sel] {
+            should = msg![env; delegate textField:text_field shouldChangeCharactersInRange:range replacementString:empty];
+        }
+    }
+    if should {
+        let new_text: id = msg![env; curr_text substringToIndex:(len - 1)];
+        let _: () = msg![env; text_field setText:new_text];
+        let _: () = msg![env; text_field setNeedsDisplay];
+        let center: id = msg_class![env; NSNotificationCenter defaultCenter];
+        let name = ns_string::get_static_str(env, UITextFieldTextDidChangeNotification);
+        let _: () = msg![env; center postNotificationName:name object:text_field userInfo:nil];
+    }
+    env.objc.borrow_mut::<UITextFieldHostObject>(text_field).text_input_in_progress = false;
+}
+'''
+          s = s[:start] + new_back + s[end:]
+          p.write_text(s)
+          PY
+
+      - name: Verify UITextField patch
+        run: |
+          grep -q 'text_input_in_progress' src/frameworks/uikit/ui_view/ui_control/ui_text_field.rs
+          grep -q 'UITextFieldTextDidChangeNotification' src/frameworks/uikit/ui_view/ui_control/ui_text_field.rs
+
       - name: Build APK
         env:
           HYPERHLE_KEYSTORE_B64: ${{ secrets.HYPERHLE_KEYSTORE_B64 }}
